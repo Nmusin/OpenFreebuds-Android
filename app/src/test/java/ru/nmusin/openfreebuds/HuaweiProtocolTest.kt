@@ -31,7 +31,8 @@ class HuaweiProtocolTest {
     @Test
     fun testAncStateParsingAndDescribing() {
         // Live 2B2A response: tag 1 = 02 01 -> level = 2 (Ultra), mode = 1 (ANC ON)
-        val frameAncUltra = HuaweiFrame.fromHex("5a0007002b2a010202010511")
+        // CRC 0x6372 verified
+        val frameAncUltra = HuaweiFrame.fromHex("5a0007002b2a010202016372")
         assertNotNull(frameAncUltra)
 
         val parsed = FreeBuds5iProtocol.parseAncState(frameAncUltra!!)
@@ -44,9 +45,11 @@ class HuaweiProtocolTest {
         assertTrue(desc.second.contains("Шумоподавление"))
 
         // Button press notify 2B03: tag 1 = 02 -> switch to Awareness
-        val frameButtonNotify = HuaweiFrame.fromHex("5a0006002b03010102bc0d")
+        // CRC 0x194e verified
+        val frameButtonNotify = HuaweiFrame.fromHex("5a0006002b03010102194e")
         assertNotNull(frameButtonNotify)
         val parsedButton = FreeBuds5iProtocol.parseAncState(frameButtonNotify!!)
+        assertNotNull(parsedButton)
         assertEquals(AncMode.AWARENESS, parsedButton!!.mode)
     }
 

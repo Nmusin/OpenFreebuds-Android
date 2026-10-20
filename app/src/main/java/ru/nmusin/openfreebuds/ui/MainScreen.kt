@@ -198,7 +198,10 @@ fun MainScreen(
                                         colors = ButtonDefaults.outlinedButtonColors(
                                             containerColor = if (isSelected) PrimaryBlue.copy(alpha = 0.25f) else Color.Transparent
                                         ),
-                                        border = if (isSelected) ButtonDefaults.outlinedButtonBorder.copy(brush = androidx.compose.ui.graphics.SolidColor(PrimaryBlue)) else ButtonDefaults.outlinedButtonBorder,
+                                        border = androidx.compose.foundation.BorderStroke(
+                                            1.dp,
+                                            if (isSelected) PrimaryBlue else Color(0xFF373A40)
+                                        ),
                                         modifier = Modifier.weight(1f),
                                         contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp)
                                     ) {
