@@ -420,6 +420,29 @@ fun FullLogsDialog(
     onDismiss: () -> Unit,
     onClear: () -> Unit
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+
+    fun exportLogs() {
+        val text = buildString {
+            appendLine("=== OpenFreebuds SPP Live Log Export ===")
+            appendLine("Date: " + java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date()))
+            appendLine("Entries count: ${logs.size}")
+            appendLine("----------------------------------------")
+            logs.reversed().forEach { entry ->
+                val dirStr = if (entry.direction == LogDirection.TX) "TX ->" else if (entry.direction == LogDirection.RX) "<- RX" else "INFO"
+                appendLine("[${entry.timestamp}] $dirStr [${entry.cmdHex}] ${entry.summary}")
+                if (entry.details.isNotEmpty()) appendLine("  Details: ${entry.details}")
+                if (entry.rawHex.isNotEmpty()) appendLine("  RAW: ${entry.rawHex}")
+                appendLine()
+            }
+        }
+        val sendIntent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+            putExtra(android.content.Intent.EXTRA_TEXT, text)
+            type = "text/plain"
+        }
+        context.startActivity(android.content.Intent.createChooser(sendIntent, "Экспорт логов SPP"))
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
@@ -429,7 +452,10 @@ fun FullLogsDialog(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text("Детальный лог SPP (${logs.size})", fontSize = 16.sp)
-                TextButton(onClick = onClear) { Text("Очистить") }
+                Row {
+                    TextButton(onClick = { exportLogs() }) { Text("Экспорт") }
+                    TextButton(onClick = onClear) { Text("Очистить") }
+                }
             }
         },
         text = {

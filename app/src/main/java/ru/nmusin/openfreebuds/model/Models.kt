@@ -38,6 +38,32 @@ data class AncState(
     val level: AncLevel = AncLevel.GENERAL
 )
 
+enum class GestureAction(val id: Int, val title: String) {
+    OFF(255, "Выключено"),
+    PAUSE_PLAY(1, "Воспроизведение / Пауза"),
+    NEXT_TRACK(2, "Следующий трек"),
+    PREV_TRACK(7, "Предыдущий трек"),
+    VOICE_ASSISTANT(0, "Голосовой ассистент");
+
+    companion object {
+        fun fromId(id: Int): GestureAction = entries.firstOrNull { it.id == id } ?: OFF
+    }
+}
+
+data class GesturesState(
+    val doubleTapLeft: GestureAction = GestureAction.PAUSE_PLAY,
+    val doubleTapRight: GestureAction = GestureAction.NEXT_TRACK,
+    val tripleTapLeft: GestureAction = GestureAction.PREV_TRACK,
+    val tripleTapRight: GestureAction = GestureAction.NEXT_TRACK,
+    val swipeEnabled: Boolean = true
+)
+
+data class WearState(
+    val leftWorn: Boolean = false,
+    val rightWorn: Boolean = false,
+    val autoPauseEnabled: Boolean = true
+)
+
 data class EqualizerPreset(
     val id: Int,
     val name: String,
