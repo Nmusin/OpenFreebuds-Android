@@ -5,9 +5,7 @@ import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothSocket
 import android.util.Log
 import kotlinx.coroutines.*
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import ru.nmusin.openfreebuds.model.*
 import ru.nmusin.openfreebuds.protocol.FreeBuds5iProtocol
@@ -41,11 +39,14 @@ class BluetoothRfcommManager(
     private val _batteryState = MutableStateFlow(BatteryState())
     val batteryState = _batteryState.asStateFlow()
 
-    private val _ancMode = MutableStateFlow(AncMode.OFF)
-    val ancMode = _ancMode.asStateFlow()
+    private val _ancState = MutableStateFlow(AncState())
+    val ancState = _ancState.asStateFlow()
 
     private val _windSuppression = MutableStateFlow(false)
     val windSuppression = _windSuppression.asStateFlow()
+
+    private val _currentEqualizerId = MutableStateFlow(1)
+    val currentEqualizerId = _currentEqualizerId.asStateFlow()
 
     private val _deviceIdentity = MutableStateFlow(DeviceIdentity())
     val deviceIdentity = _deviceIdentity.asStateFlow()
@@ -53,16 +54,40 @@ class BluetoothRfcommManager(
     private val _fitTestState = MutableStateFlow(FitTestState())
     val fitTestState = _fitTestState.asStateFlow()
 
+    private val _logEntries = MutableStateFlow<List<LogEntry>>(emptyList())
+    val logEntries = _logEntries.asStateFlow()
+
     private var readerJob: Job? = null
+
+    fun addLog(entry: LogEntry) {
+        val current = _logEntries.value.toMutableList()
+        current.add(0, entry) // Newest on top
+        if (current.size > 200) {
+            _logEntries.value = current.take(200)
+        } else {
+            _logEntries.value = current
+        }
+    }
+
+    fun clearLogs() {
+        _logEntries.value = emptyList()
+    }
 
     @SuppressLint("MissingPermission")
     suspend fun connect(device: BluetoothDevice): Boolean = withContext(Dispatchers.IO) {
         _connectionStatus.value = ConnectionStatus.CONNECTING
+        addLog(
+            LogEntry(
+                direction = LogDirection.INFO,
+                cmdHex = "CONNECT",
+                summary = "Подключение...",
+                rawHex = device.address,
+                details = "Инициализация RFCOMM сокета (канал 16)"
+            )
+        )
         try {
             Log.d(TAG, "Connecting to ${device.address} via RFCOMM SPP...")
-            // FreeBuds 5i uses RFCOMM Channel 16 or standard SPP service record
             val s = try {
-                // Try reflection for channel 16 directly (guaranteed for 5i)
                 val m = device.javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
                 m.invoke(device, 16) as BluetoothSocket
             } catch (e: Exception) {
@@ -75,7 +100,15 @@ class BluetoothRfcommManager(
             outputStream = s.outputStream
 
             _connectionStatus.value = ConnectionStatus.CONNECTED
-            Log.d(TAG, "Connected to ${device.name ?: device.address}!")
+            addLog(
+                LogEntry(
+                    direction = LogDirection.INFO,
+                    cmdHex = "CONNECTED",
+                    summary = "Соединение установлено",
+                    rawHex = device.address,
+                    details = "Канал RFCOMM активен"
+                )
+            )
 
             startReaderLoop()
 
@@ -86,17 +119,26 @@ class BluetoothRfcommManager(
         } catch (e: Exception) {
             Log.e(TAG, "Connection failed", e)
             _connectionStatus.value = ConnectionStatus.ERROR
+            addLog(
+                LogEntry(
+                    direction = LogDirection.INFO,
+                    cmdHex = "ERROR",
+                    summary = "Ошибка подключения",
+                    rawHex = "",
+                    details = e.message ?: "Unknown socket error"
+                )
+            )
             disconnect()
             false
         }
     }
 
     private suspend fun initDevice() {
-        // Query battery and device identity on startup
         sendFrame(FreeBuds5iProtocol.buildBatteryReadRequest())
         sendFrame(FreeBuds5iProtocol.buildDeviceIdentityRequest())
         sendFrame(FreeBuds5iProtocol.buildWindSuppressionReadRequest())
         sendFrame(FreeBuds5iProtocol.buildAncReadRequest())
+        sendFrame(FreeBuds5iProtocol.buildEqualizerReadRequest())
     }
 
     fun disconnect() {
@@ -114,9 +156,22 @@ class BluetoothRfcommManager(
     suspend fun sendFrame(frame: HuaweiFrame): Boolean = withContext(Dispatchers.IO) {
         try {
             val bytes = frame.toByteArray()
+            val cmdHex = "%02X%02X".format(frame.service, frame.command)
+            val desc = FreeBuds5iProtocol.describeFrame(frame, isTx = true)
+
             outputStream?.write(bytes)
             outputStream?.flush()
-            Log.d(TAG, "TX -> [${frame.service.toString(16)}, ${frame.command.toString(16)}]: ${frame.toHexString()}")
+
+            Log.d(TAG, "TX -> [$cmdHex]: ${frame.toHexString()}")
+            addLog(
+                LogEntry(
+                    direction = LogDirection.TX,
+                    cmdHex = cmdHex,
+                    summary = desc.first,
+                    rawHex = frame.toHexString(),
+                    details = desc.second
+                )
+            )
             true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to send frame", e)
@@ -146,7 +201,6 @@ class BluetoothRfcommManager(
                             break
                         }
                         if (magicIdx > 0) {
-                            // Discard garbage before magic
                             repeat(magicIdx) { streamBuffer.removeAt(0) }
                         }
                         if (streamBuffer.size < 7) break
@@ -155,7 +209,6 @@ class BluetoothRfcommManager(
                         val totalFrameSize = len + 5
 
                         if (streamBuffer.size < totalFrameSize) {
-                            // Wait for remaining frame bytes
                             break
                         }
 
@@ -179,12 +232,23 @@ class BluetoothRfcommManager(
     }
 
     private suspend fun handleIncomingFrame(frame: HuaweiFrame) {
-        Log.d(TAG, "RX <- [${frame.service.toString(16)}, ${frame.command.toString(16)}]: ${frame.toHexString()}")
+        val cmdHex = "%02X%02X".format(frame.service, frame.command)
+        val desc = FreeBuds5iProtocol.describeFrame(frame, isTx = false)
+
+        Log.d(TAG, "RX <- [$cmdHex]: ${frame.toHexString()}")
+        addLog(
+            LogEntry(
+                direction = LogDirection.RX,
+                cmdHex = cmdHex,
+                summary = desc.first,
+                rawHex = frame.toHexString(),
+                details = desc.second
+            )
+        )
 
         // 1. Handshake 0A0E Big-Data capability query
         if (frame.service == FreeBuds5iProtocol.SERVICE_MANAGEMENT &&
             frame.command == FreeBuds5iProtocol.CMD_BIG_DATA_CAPABILITY) {
-            Log.i(TAG, "Received 0A0E BigData push -> sending capability answer to prevent disconnect")
             sendFrame(FreeBuds5iProtocol.buildBigDataCapabilityReply())
             return
         }
@@ -196,26 +260,47 @@ class BluetoothRfcommManager(
             return
         }
 
-        // 3. Wind suppression (read response or push 2B 95)
-        if (frame.service == FreeBuds5iProtocol.SERVICE_INTELLIGENT &&
-            frame.command == FreeBuds5iProtocol.CMD_WIND_SUPPRESSION_READ) {
-            val state = FreeBuds5iProtocol.parseWindSuppression(frame)
-            if (state != null) _windSuppression.value = state
-            return
-        }
+        // 3. ANC state (response 2B 2A or on-device button push 2B 03)
+        if (frame.service == FreeBuds5iProtocol.SERVICE_INTELLIGENT) {
+            if (frame.command == FreeBuds5iProtocol.CMD_ANC_READ || frame.command == FreeBuds5iProtocol.CMD_ANC_NOTIFY) {
+                val parsedAnc = FreeBuds5iProtocol.parseAncState(frame, _ancState.value)
+                if (parsedAnc != null) {
+                    _ancState.value = parsedAnc
+                }
+                if (frame.command == FreeBuds5iProtocol.CMD_ANC_NOTIFY) {
+                    // Button press notify: request fresh status frame to sync level
+                    sendFrame(FreeBuds5iProtocol.buildAncReadRequest())
+                }
+                return
+            }
 
-        // 4. Device Identity (2B 0A)
-        if (frame.service == FreeBuds5iProtocol.SERVICE_INTELLIGENT &&
-            frame.command == FreeBuds5iProtocol.CMD_DEVICE_IDENTITY) {
-            _deviceIdentity.value = FreeBuds5iProtocol.parseDeviceIdentity(frame)
-            return
-        }
+            // 4. Equalizer (2B 4A)
+            if (frame.command == FreeBuds5iProtocol.CMD_EQ_READ) {
+                val eqId = FreeBuds5iProtocol.parseEqualizer(frame)
+                if (eqId != null) {
+                    _currentEqualizerId.value = eqId
+                }
+                return
+            }
 
-        // 5. Fit Test Notify (2B 27)
-        if (frame.service == FreeBuds5iProtocol.SERVICE_INTELLIGENT &&
-            frame.command == FreeBuds5iProtocol.CMD_FIT_TEST_NOTIFY) {
-            _fitTestState.value = FreeBuds5iProtocol.parseFitTestNotify(frame, _fitTestState.value)
-            return
+            // 5. Wind suppression (read response or push 2B 95)
+            if (frame.command == FreeBuds5iProtocol.CMD_WIND_SUPPRESSION_READ) {
+                val state = FreeBuds5iProtocol.parseWindSuppression(frame)
+                if (state != null) _windSuppression.value = state
+                return
+            }
+
+            // 6. Device Identity (2B 0A)
+            if (frame.command == FreeBuds5iProtocol.CMD_DEVICE_IDENTITY) {
+                _deviceIdentity.value = FreeBuds5iProtocol.parseDeviceIdentity(frame)
+                return
+            }
+
+            // 7. Fit Test Notify (2B 27)
+            if (frame.command == FreeBuds5iProtocol.CMD_FIT_TEST_NOTIFY) {
+                _fitTestState.value = FreeBuds5iProtocol.parseFitTestNotify(frame, _fitTestState.value)
+                return
+            }
         }
     }
 }

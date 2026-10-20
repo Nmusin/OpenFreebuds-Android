@@ -2,7 +2,11 @@ package ru.nmusin.openfreebuds.ui
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -14,13 +18,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 import ru.nmusin.openfreebuds.bluetooth.BluetoothRfcommManager
 import ru.nmusin.openfreebuds.bluetooth.ConnectionStatus
-import ru.nmusin.openfreebuds.model.AncMode
+import ru.nmusin.openfreebuds.model.*
 import ru.nmusin.openfreebuds.protocol.FreeBuds5iProtocol
 import ru.nmusin.openfreebuds.ui.theme.*
 
@@ -33,9 +38,13 @@ fun MainScreen(
     val scope = rememberCoroutineScope()
     val connectionStatus by rfcommManager.connectionStatus.collectAsState()
     val battery by rfcommManager.batteryState.collectAsState()
-    val ancMode by rfcommManager.ancMode.collectAsState()
+    val ancState by rfcommManager.ancState.collectAsState()
     val windSuppression by rfcommManager.windSuppression.collectAsState()
+    val currentEqId by rfcommManager.currentEqualizerId.collectAsState()
     val identity by rfcommManager.deviceIdentity.collectAsState()
+    val logs by rfcommManager.logEntries.collectAsState()
+
+    var showLogsDialog by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -64,6 +73,9 @@ fun MainScreen(
                     }
                 },
                 actions = {
+                    IconButton(onClick = { showLogsDialog = true }) {
+                        Icon(Icons.Default.Terminal, contentDescription = "Лог протокола", tint = TextPrimary)
+                    }
                     IconButton(onClick = onSelectDevice) {
                         Icon(Icons.Default.Bluetooth, contentDescription = "Выбор устройства", tint = TextPrimary)
                     }
@@ -101,14 +113,31 @@ fun MainScreen(
                 }
             }
 
-            // 2. Noise Control Card
+            // 2. Sound & Noise Control Card
             Card(
                 shape = RoundedCornerShape(16.dp),
                 colors = CardDefaults.cardColors(containerColor = DarkCard),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
-                    Text("Управление шумом", fontWeight = FontWeight.SemiBold, fontSize = 16.sp, color = TextPrimary)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Режим звука и ANC", fontWeight = FontWeight.SemiBold, fontSize = 16.sp, color = TextPrimary)
+                        Text(
+                            text = ancState.mode.title,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = when (ancState.mode) {
+                                AncMode.ON -> PrimaryBlue
+                                AncMode.AWARENESS -> AccentGreen
+                                AncMode.OFF -> TextSecondary
+                            }
+                        )
+                    }
+
                     Spacer(modifier = Modifier.height(12.dp))
 
                     Row(
@@ -117,7 +146,7 @@ fun MainScreen(
                     ) {
                         AncButton(
                             title = "Выкл",
-                            selected = ancMode == AncMode.OFF,
+                            selected = ancState.mode == AncMode.OFF,
                             modifier = Modifier.weight(1f)
                         ) {
                             scope.launch {
@@ -126,20 +155,56 @@ fun MainScreen(
                         }
                         AncButton(
                             title = "Шумоподавление",
-                            selected = ancMode == AncMode.ON,
+                            selected = ancState.mode == AncMode.ON,
                             modifier = Modifier.weight(1f)
                         ) {
                             scope.launch {
-                                rfcommManager.sendFrame(FreeBuds5iProtocol.buildAncSetRequest(AncMode.ON))
+                                rfcommManager.sendFrame(FreeBuds5iProtocol.buildAncSetRequest(AncMode.ON, ancState.level))
                             }
                         }
                         AncButton(
                             title = "Прозрачность",
-                            selected = ancMode == AncMode.AWARENESS,
+                            selected = ancState.mode == AncMode.AWARENESS,
                             modifier = Modifier.weight(1f)
                         ) {
                             scope.launch {
                                 rfcommManager.sendFrame(FreeBuds5iProtocol.buildAncSetRequest(AncMode.AWARENESS))
+                            }
+                        }
+                    }
+
+                    // Level selector when ANC is ON
+                    AnimatedVisibility(visible = ancState.mode == AncMode.ON) {
+                        Column(modifier = Modifier.padding(top = 16.dp)) {
+                            Text("Уровень шумоподавления", fontSize = 13.sp, color = TextSecondary)
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                val levels = listOf(
+                                    AncLevel.COZY to "Комфорт",
+                                    AncLevel.GENERAL to "Обычный",
+                                    AncLevel.ULTRA to "Ультра"
+                                )
+                                levels.forEach { (lvl, title) ->
+                                    val isSelected = ancState.level == lvl
+                                    OutlinedButton(
+                                        onClick = {
+                                            scope.launch {
+                                                rfcommManager.sendFrame(FreeBuds5iProtocol.buildAncSetRequest(AncMode.ON, lvl))
+                                            }
+                                        },
+                                        colors = ButtonDefaults.outlinedButtonColors(
+                                            containerColor = if (isSelected) PrimaryBlue.copy(alpha = 0.25f) else Color.Transparent
+                                        ),
+                                        border = if (isSelected) ButtonDefaults.outlinedButtonBorder.copy(brush = androidx.compose.ui.graphics.SolidColor(PrimaryBlue)) else ButtonDefaults.outlinedButtonBorder,
+                                        modifier = Modifier.weight(1f),
+                                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp)
+                                    ) {
+                                        Text(title, fontSize = 11.sp, color = if (isSelected) PrimaryBlue else TextPrimary, maxLines = 1)
+                                    }
+                                }
                             }
                         }
                     }
@@ -156,7 +221,7 @@ fun MainScreen(
                     ) {
                         Column {
                             Text("Подавление ветра", fontWeight = FontWeight.Medium, color = TextPrimary)
-                            Text("Устраняет шум ветра в микрофонах", fontSize = 12.sp, color = TextSecondary)
+                            Text("Команда 2B94 (инверсная полярность)", fontSize = 11.sp, color = TextSecondary)
                         }
                         Switch(
                             checked = windSuppression,
@@ -170,54 +235,7 @@ fun MainScreen(
                 }
             }
 
-            // 3. Find My Earbuds Card
-            Card(
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = DarkCard),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text("Поиск наушников", fontWeight = FontWeight.SemiBold, fontSize = 16.sp, color = TextPrimary)
-                    Text("Воспроизведение громкого звукового сигнала", fontSize = 12.sp, color = TextSecondary)
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        var leftRinging by remember { mutableStateOf(false) }
-                        var rightRinging by remember { mutableStateOf(false) }
-
-                        Button(
-                            onClick = {
-                                leftRinging = !leftRinging
-                                scope.launch {
-                                    rfcommManager.sendFrame(FreeBuds5iProtocol.buildFindMyBudsRequest(isRight = false, start = leftRinging))
-                                }
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = if (leftRinging) DangerRed else DarkSurface),
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text(if (leftRinging) "Стоп (Левый)" else "Звонок (Левый)", color = TextPrimary, fontSize = 12.sp)
-                        }
-
-                        Button(
-                            onClick = {
-                                rightRinging = !rightRinging
-                                scope.launch {
-                                    rfcommManager.sendFrame(FreeBuds5iProtocol.buildFindMyBudsRequest(isRight = true, start = rightRinging))
-                                }
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = if (rightRinging) DangerRed else DarkSurface),
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text(if (rightRinging) "Стоп (Правый)" else "Звонок (Правый)", color = TextPrimary, fontSize = 12.sp)
-                        }
-                    }
-                }
-            }
-
-            // 4. Equalizer Presets Card
+            // 3. Equalizer Presets Card
             Card(
                 shape = RoundedCornerShape(16.dp),
                 colors = CardDefaults.cardColors(containerColor = DarkCard),
@@ -227,7 +245,6 @@ fun MainScreen(
                     Text("Эквалайзер", fontWeight = FontWeight.SemiBold, fontSize = 16.sp, color = TextPrimary)
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    var selectedEq by remember { mutableIntStateOf(1) }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -239,15 +256,15 @@ fun MainScreen(
                             9 to "Голос"
                         )
                         presets.forEach { (id, label) ->
+                            val isSelected = currentEqId == id
                             OutlinedButton(
                                 onClick = {
-                                    selectedEq = id
                                     scope.launch {
                                         rfcommManager.sendFrame(FreeBuds5iProtocol.buildEqualizerSelectPresetRequest(id))
                                     }
                                 },
                                 colors = ButtonDefaults.outlinedButtonColors(
-                                    containerColor = if (selectedEq == id) PrimaryBlue else Color.Transparent
+                                    containerColor = if (isSelected) PrimaryBlue else Color.Transparent
                                 ),
                                 modifier = Modifier.weight(1f),
                                 contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
@@ -258,8 +275,176 @@ fun MainScreen(
                     }
                 }
             }
+
+            // 4. Live Log Card
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = DarkCard),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Terminal, contentDescription = null, tint = PrimaryBlue, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Лог пакетов SPP", fontWeight = FontWeight.SemiBold, fontSize = 15.sp, color = TextPrimary)
+                        }
+                        TextButton(onClick = { rfcommManager.clearLogs() }) {
+                            Text("Очистить", fontSize = 12.sp, color = TextSecondary)
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    if (logs.isEmpty()) {
+                        Text(
+                            "Лог пуст. Подключитесь к наушникам для мониторинга обмена.",
+                            fontSize = 12.sp,
+                            color = TextSecondary,
+                            modifier = Modifier.padding(vertical = 8.dp)
+                        )
+                    } else {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 240.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(DarkBackground)
+                                .padding(8.dp)
+                                .verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            logs.take(15).forEach { entry ->
+                                LogRow(entry)
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
+
+    if (showLogsDialog) {
+        FullLogsDialog(logs = logs, onDismiss = { showLogsDialog = false }, onClear = { rfcommManager.clearLogs() })
+    }
+}
+
+@Composable
+fun LogRow(entry: LogEntry) {
+    val dirColor = when (entry.direction) {
+        LogDirection.TX -> PrimaryBlue
+        LogDirection.RX -> AccentGreen
+        LogDirection.INFO -> TextSecondary
+    }
+    val dirLabel = when (entry.direction) {
+        LogDirection.TX -> "TX ->"
+        LogDirection.RX -> "<- RX"
+        LogDirection.INFO -> "INFO"
+    }
+
+    var expanded by remember { mutableStateOf(false) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(4.dp))
+            .background(DarkSurface)
+            .clickable { expanded = !expanded }
+            .padding(6.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = dirLabel,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace,
+                    color = dirColor
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "[${entry.cmdHex}]",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace,
+                    color = TextPrimary
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = entry.summary,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = TextPrimary,
+                    maxLines = 1
+                )
+            }
+            Text(text = entry.timestamp, fontSize = 9.sp, color = TextSecondary)
+        }
+
+        if (entry.details.isNotEmpty()) {
+            Text(
+                text = entry.details,
+                fontSize = 10.sp,
+                color = TextSecondary,
+                modifier = Modifier.padding(top = 2.dp)
+            )
+        }
+
+        if (expanded && entry.rawHex.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = entry.rawHex,
+                fontSize = 9.sp,
+                fontFamily = FontFamily.Monospace,
+                color = TextSecondary,
+                lineHeight = 12.sp
+            )
+        }
+    }
+}
+
+@Composable
+fun FullLogsDialog(
+    logs: List<LogEntry>,
+    onDismiss: () -> Unit,
+    onClear: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Детальный лог SPP (${logs.size})", fontSize = 16.sp)
+                TextButton(onClick = onClear) { Text("Очистить") }
+            }
+        },
+        text = {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(400.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                items(logs) { entry ->
+                    LogRow(entry)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Закрыть") }
+        }
+    )
 }
 
 @Composable

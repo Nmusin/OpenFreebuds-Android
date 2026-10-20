@@ -19,6 +19,7 @@ object FreeBuds5iProtocol {
     const val CMD_BATTERY_NOTIFY = 0x27
     const val CMD_BIG_DATA_CAPABILITY = 0x0E
     const val CMD_DEVICE_IDENTITY = 0x0A
+    const val CMD_ANC_NOTIFY = 0x03
     const val CMD_ANC_WRITE = 0x04
     const val CMD_ANC_READ = 0x2A
     const val CMD_WIND_SUPPRESSION_WRITE = 0x94
@@ -76,11 +77,16 @@ object FreeBuds5iProtocol {
 
     /**
      * Set ANC mode and level (2B 04 tag 1 = [mode, level]).
-     * Level 0xFF = keep current level.
+     * mode: 0 = OFF, 1 = ON, 2 = AWARENESS.
+     * level: 0..3 (General/Cozy/Ultra/Dynamic AI) or 0xFF keep.
      */
     fun buildAncSetRequest(mode: AncMode, level: AncLevel = AncLevel.GENERAL): HuaweiFrame {
         val levelByte = if (mode == AncMode.ON) level.id.toByte() else 0xFF.toByte()
-        val data = if (mode == AncMode.OFF) byteArrayOf(0x00, 0x00) else byteArrayOf(mode.id.toByte(), levelByte)
+        val data = if (mode == AncMode.OFF) {
+            byteArrayOf(0x00, 0x00)
+        } else {
+            byteArrayOf(mode.id.toByte(), levelByte)
+        }
         return HuaweiFrame(
             service = SERVICE_INTELLIGENT,
             command = CMD_ANC_WRITE,
@@ -139,6 +145,17 @@ object FreeBuds5iProtocol {
     }
 
     /**
+     * Read equalizer status (2B 4A).
+     */
+    fun buildEqualizerReadRequest(): HuaweiFrame {
+        return HuaweiFrame(
+            service = SERVICE_INTELLIGENT,
+            command = CMD_EQ_READ,
+            params = listOf(TlvParam(2, byteArrayOf()))
+        )
+    }
+
+    /**
      * Set custom 10-band equalizer preset in slot 100-102 (2B 49).
      * Strict TLV order: tag 1, tag 2, tag 5, tag 3, tag 4.
      * Name truncated to maximum 24 UTF-8 bytes on character boundaries.
@@ -190,6 +207,36 @@ object FreeBuds5iProtocol {
     }
 
     // --- Parsers ---
+
+    /**
+     * Parse ANC state from 2B 2A (read/push) or 2B 03 (hardware button notify).
+     * In 2B 2A: tag 1 value = [level, mode] (wire order is inverted!).
+     * In 2B 03: tag 1 value = [mode].
+     */
+    fun parseAncState(frame: HuaweiFrame, current: AncState = AncState()): AncState? {
+        val p1 = frame.findParam(1) ?: return null
+        return when {
+            frame.command == CMD_ANC_READ && p1.size >= 2 -> {
+                val level = AncLevel.fromId(p1[0].toInt() and 0xFF)
+                val mode = AncMode.fromId(p1[1].toInt() and 0xFF)
+                AncState(mode, level)
+            }
+            frame.command == CMD_ANC_NOTIFY && p1.isNotEmpty() -> {
+                val mode = AncMode.fromId(p1[0].toInt() and 0xFF)
+                current.copy(mode = mode)
+            }
+            else -> null
+        }
+    }
+
+    /**
+     * Parse equalizer preset ID from 2B 4A (tag 2 = current_id).
+     */
+    fun parseEqualizer(frame: HuaweiFrame): Int? {
+        val p2 = frame.findParam(2) ?: return null
+        if (p2.isEmpty()) return null
+        return p2[0].toInt() and 0xFF
+    }
 
     /**
      * Parse battery from 01 08 (read response) or 01 27 (notify push).
@@ -279,6 +326,75 @@ object FreeBuds5iProtocol {
         }
 
         return FitTestState(left, right, verdict, isTesting = (verdict == FitVerdict.TESTING))
+    }
+
+    /**
+     * Generates a clear, human-readable summary and detailed decoding of any frame
+     * for real-time live protocol logging.
+     */
+    fun describeFrame(frame: HuaweiFrame, isTx: Boolean): Pair<String, String> {
+        val cmdHex = "%02X%02X".format(frame.service, frame.command)
+        return when {
+            frame.service == SERVICE_MANAGEMENT && frame.command == CMD_BIG_DATA_CAPABILITY -> {
+                if (isTx) "Handshake Answer" to "Ответ BigData capability (tag 2 = 0x00)"
+                else "Handshake Query" to "Запрос BigData capability (tag 1 = 0x00)"
+            }
+            frame.service == SERVICE_DEVICE_MANAGEMENT && (frame.command == CMD_BATTERY_READ || frame.command == CMD_BATTERY_NOTIFY) -> {
+                val state = parseBattery(frame)
+                "Батарея" to "L: ${state.left?.let { "$it%" } ?: "—"}, R: ${state.right?.let { "$it%" } ?: "—"}, Case: ${state.case?.let { "$it%" } ?: "—"}"
+            }
+            frame.service == SERVICE_INTELLIGENT && frame.command == CMD_ANC_WRITE -> {
+                val p1 = frame.findParam(1)
+                if (p1 != null && p1.size >= 2) {
+                    val mode = AncMode.fromId(p1[0].toInt() and 0xFF)
+                    val level = AncLevel.fromId(p1[1].toInt() and 0xFF)
+                    "ANC Установка" to "Режим: ${mode.title}, Уровень: ${level.title}"
+                } else "ANC Установка" to "Запись параметров ANC"
+            }
+            frame.service == SERVICE_INTELLIGENT && frame.command == CMD_ANC_READ -> {
+                val anc = parseAncState(frame)
+                if (anc != null) "ANC Статус" to "Режим: ${anc.mode.title}, Уровень: ${anc.level.title}"
+                else "ANC Запрос" to "Чтение состояния шумоподавления"
+            }
+            frame.service == SERVICE_INTELLIGENT && frame.command == CMD_ANC_NOTIFY -> {
+                val anc = parseAncState(frame)
+                "ANC Кнопка (Push)" to "Переключение кнопкой наушника -> ${anc?.mode?.title ?: "смена режима"}"
+            }
+            frame.service == SERVICE_INTELLIGENT && (frame.command == CMD_WIND_SUPPRESSION_WRITE || frame.command == CMD_WIND_SUPPRESSION_READ) -> {
+                val enabled = parseWindSuppression(frame)
+                val statusStr = if (enabled == true) "ВКЛ (wire 0x00)" else if (enabled == false) "ВЫКЛ (wire 0x01)" else "запрос"
+                "Шум ветра" to "Подавление ветра: $statusStr"
+            }
+            frame.service == SERVICE_INTELLIGENT && frame.command == CMD_EQ_WRITE -> {
+                val p1 = frame.findParam(1)
+                val id = if (p1 != null && p1.isNotEmpty()) p1[0].toInt() and 0xFF else -1
+                val name = when (id) {
+                    1 -> "По умолчанию"; 2 -> "Басы"; 3 -> "Высокие"; 9 -> "Голос"
+                    in 100..102 -> "Кастомный слот $id"
+                    else -> "Пресет $id"
+                }
+                "Эквалайзер Установка" to "Выбран пресет: $name"
+            }
+            frame.service == SERVICE_INTELLIGENT && frame.command == CMD_EQ_READ -> {
+                val curId = parseEqualizer(frame)
+                if (curId != null) "Эквалайзер Статус" to "Текущий пресет ID: $curId"
+                else "Эквалайзер Запрос" to "Чтение пресета"
+            }
+            frame.service == SERVICE_INTELLIGENT && frame.command == CMD_FIND_MY_BUDS_WRITE -> {
+                val p1 = frame.findParam(1)
+                val isRight = p1?.getOrNull(0)?.toInt() == 1
+                val isStart = p1?.getOrNull(1)?.toInt() == 0
+                val side = if (isRight) "Правый" else "Левый"
+                val act = if (isStart) "Старт звонка" else "Стоп звонка"
+                "Поиск наушников" to "$side: $act"
+            }
+            frame.service == SERVICE_INTELLIGENT && frame.command == CMD_DEVICE_IDENTITY -> {
+                val id = parseDeviceIdentity(frame)
+                if (id.modelName.isNotEmpty()) "Идентификация" to "${id.modelName} (FW ${id.firmwareVersion}, SN ${id.serialNumber})"
+                else "Идентификация Запрос" to "Запрос паспорта устройства"
+            }
+            else -> "Пакет $cmdHex" to "Params: ${frame.params.size} TLV"
+        }
     }
 
     private fun truncateUtf8(text: String, maxBytes: Int): ByteArray {
