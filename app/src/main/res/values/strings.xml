@@ -1,0 +1,15 @@
+<resources>
+    <string name="app_name">OpenFreebuds</string>
+    <string name="connecting">Подключение...</string>
+    <string name="connected">Подключено</string>
+    <string name="disconnected">Отключено</string>
+    <string name="battery_title">Заряд аккумулятора</string>
+    <string name="anc_title">Управление шумом</string>
+    <string name="anc_off">Выкл</string>
+    <string name="anc_on">Шумоподавление</string>
+    <string name="anc_awareness">Прозрачность</string>
+    <string name="wind_suppression">Подавление шума ветра</string>
+    <string name="equalizer_title">Эквалайзер</string>
+    <string name="find_buds_title">Поиск наушников</string>
+    <string name="fit_test_title">Проверка прилегания</string>
+</resources>
